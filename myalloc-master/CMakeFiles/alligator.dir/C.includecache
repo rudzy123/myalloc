@@ -1,0 +1,30 @@
+#IncludeRegexLine: ^[ 	]*#[ 	]*(include|import)[ 	]*[<"]([^">]+)([">])
+
+#IncludeRegexScan: ^.*$
+
+#IncludeRegexComplain: ^$
+
+#IncludeRegexTransform: 
+
+/cygdrive/c/Users/rudol/OperatingSystemsClassUMD/capStoneProject1/myalloc/alligator.c
+stdio.h
+-
+stdlib.h
+-
+string.h
+-
+time.h
+-
+myalloc.h
+/cygdrive/c/Users/rudol/OperatingSystemsClassUMD/capStoneProject1/myalloc/myalloc.h
+
+/cygdrive/c/Users/rudol/OperatingSystemsClassUMD/capStoneProject1/myalloc/myalloc.c
+stdio.h
+-
+stdlib.h
+-
+myalloc.h
+/cygdrive/c/Users/rudol/OperatingSystemsClassUMD/capStoneProject1/myalloc/myalloc.h
+
+/cygdrive/c/Users/rudol/OperatingSystemsClassUMD/capStoneProject1/myalloc/myalloc.h
+

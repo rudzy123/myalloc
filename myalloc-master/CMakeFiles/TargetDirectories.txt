@@ -1,0 +1,3 @@
+/cygdrive/c/Users/rudol/OperatingSystemsClassUMD/capStoneProject1/myalloc/CMakeFiles/edit_cache.dir
+/cygdrive/c/Users/rudol/OperatingSystemsClassUMD/capStoneProject1/myalloc/CMakeFiles/alligator.dir
+/cygdrive/c/Users/rudol/OperatingSystemsClassUMD/capStoneProject1/myalloc/CMakeFiles/rebuild_cache.dir

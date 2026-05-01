@@ -1,0 +1,1 @@
+/usr/bin/cc     CMakeFiles/alligator.dir/alligator.c.obj CMakeFiles/alligator.dir/myalloc.c.obj  -o alligator 
