@@ -1,5 +1,5 @@
+allocator
 *.o
-alligator
-.idea/
-*~
-.\#*
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake

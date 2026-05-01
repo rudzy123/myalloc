@@ -6,9 +6,10 @@
 
 ## 📌 Overview
 
-This project implements a simplified memory allocator in C, similar to `malloc()` and `free()`.  
+This project implements a custom memory allocator in C, similar to `malloc()` and `free()`.  
+The allocator manages a fixed-size heap and dynamically allocates and frees memory using a **free list**.
 
-The allocator manages a fixed-size heap and uses a **free list** to track available memory regions. It supports allocation, deallocation, and coalescing of adjacent free blocks.
+The system was designed and validated using a comprehensive test suite that checks allocation correctness, memory reuse, and fragmentation handling.
 
 ---
 
@@ -16,87 +17,84 @@ The allocator manages a fixed-size heap and uses a **free list** to track availa
 
 This project demonstrates core systems programming concepts:
 
-- Manual memory management
+- Manual heap management
 - Pointer arithmetic
-- Free-list data structure
+- Memory layout design
+- Free list data structures
 - Block splitting
 - Memory coalescing
-- Heap integrity checking
+- Detection of memory corruption
 
 ---
 
-## ⚙️ Implementation Details
+## ⚙️ Memory Layout
 
-### 🔹 `myalloc(size)`
-Allocates a block of memory of the requested size.
+Allocated and free memory regions are represented differently:
 
-Each allocated block contains a header:
+### 🔹 Allocated Block
 
+``
 [ header_t ][ user data ]
 
-The header stores:
-- `size` → size of allocated buffer
-- `magic` → used for corruption detection
+- `header_t.size` → size of allocated memory
+- `header_t.magic` → used to detect corruption or double free
 
 ---
 
-### 🔹 Free List Structure
-
-Free regions are stored as an **embedded linked list**:
+### 🔹 Free Block
 
 
 [ node_t ][ free space ]
 
-Each node contains:
-- `size` → amount of free space
-- `next` → pointer to next free block
+- `node_t.size` → size of free region
+- `node_t.next` → pointer to next free block
 
 ---
 
-### 🔹 `myfree(ptr)`
+## 🔧 Core Functions
 
-Frees a previously allocated block:
-
-1. Converts the header back into a `node_t`
-2. Inserts it into the free list (sorted by address)
-3. Calls `coalesce_freelist()`
+### ✅ `myalloc(size_t size)`
+- Finds a suitable free block using **first-fit**
+- Splits the block if excess space remains
+- Returns pointer to usable memory
 
 ---
 
-### 🔹 `coalesce_freelist()`
+### ✅ `myfree(void *ptr)`
+- Converts an allocated block back into a free block
+- Inserts it into the free list
+- Detects invalid frees using a magic number
 
-Merges adjacent free blocks into larger blocks to reduce fragmentation.
+---
 
-Example:
-
-
-Before:
-[free][free]
-After:
-[larger free block]
+### ✅ `coalesce_freelist()`
+- Combines adjacent free blocks into larger blocks
+- Reduces memory fragmentation
+- Uses sorting + merging to ensure correctness
 
 ---
 
 ## 🧪 Test Suite
 
-The project includes a comprehensive test suite (`alligator.c`) that validates:
+The allocator is validated using an extensive test suite (`alligator.c`):
 
-| Test | Description |
-|------|------------|
+| Test | Purpose |
+|------|--------|
 | Test 0 | Basic allocation |
 | Test 1 | Block splitting |
 | Test 2 | Allocation failure |
 | Test 3 | Freeing memory |
-| Test 4 | Double-free detection |
-| Test 5 | Coalescing |
+| Test 4 | Double free detection |
+| Test 5 | Coalescing free blocks |
 | Test 6 | Edge-case coalescing |
-| Test 7 | Memory reuse (no leaks) |
+| Test 7 | Memory reuse and leak detection |
 
 ---
 
 ## 🛠️ Build & Run
 
 Compile:
+
 ```bash
 make
 
@@ -105,31 +103,39 @@ Shellmake runShow more lines
 Clean build:
 Shellmake cleanShow more lines
 
-📦 Project Structure
+📁 Project Structure
 myalloc/
 ├── myalloc.c       # allocator implementation
-├── myalloc.h       # structures + prototypes
+├── myalloc.h       # data structures + prototypes
 ├── alligator.c     # test suite
 ├── Makefile        # build system
-└── README.md       # documentation
+└── README.md
+
+
+🔍 Design Notes
+
+Uses a first-fit allocation strategy
+Free blocks are stored in a linked list
+Coalescing is implemented by sorting the free list and merging adjacent regions
+Heap integrity is verified using a magic number
 
 
 🚀 What I Learned
 
 How real-world memory allocators manage heap memory
-Importance of maintaining data structure invariants
-Debugging memory corruption and segmentation faults
-Designing systems that remain correct over time
+The importance of maintaining consistent data structures
+How small pointer arithmetic mistakes can cause major bugs
+Techniques for debugging segmentation faults and memory corruption
 
 
 ✅ Future Improvements
 
-Best-fit allocation strategy
-Memory alignment (8/16-byte boundaries)
-Thread-safe allocator
-Performance benchmarking
+Implement best-fit allocation strategy
+Add alignment (8/16-byte boundaries like real malloc)
+Improve performance by avoiding sorting during coalescing
+Add visualization of heap state
 
 
-📚 References
+📚 Reference
 
-OSTEP (Operating Systems: Three Easy Pieces), Chapter 17
+Operating Systems: Three Easy Pieces (OSTEP), Chapter 17
