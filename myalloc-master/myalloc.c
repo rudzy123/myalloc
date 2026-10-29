@@ -262,8 +262,14 @@ static void insert_freenode(node_t *node)
 #endif
 }
 
-/* rhs's header becomes payload: size += sizeof(node_t) + rhs->size.
- * Two 512-byte neighbors become 1024 + sizeof(header_t) (tests 5.2, 6.2). */
+/*
+ * MERGE ARITHMETIC: rhs starts exactly where lhs ends, i.e.
+ *   (char *)lhs + sizeof(node_t) + lhs->size == (char *)rhs.
+ * rhs's record becomes payload of lhs:
+ *   lhs->size += sizeof(node_t) + rhs->size
+ * Two 512-byte neighbors become 512 + 16 + 512 = 1040 (tests 5.2, 6.2).
+ * The caller checks adjacency and unlinks rhs.
+ */
 static void absorb_neighbor(node_t *lhs, const node_t *rhs)
 {
     lhs->size += (unsigned long)sizeof(node_t) + rhs->size;
@@ -359,9 +365,14 @@ static void *take_block(node_t *prev, node_t *block, size_t request)
 
     spare = (size_t)free_size - request;
     /*
-     * Split iff the leftover can hold a node_t, including a 0-byte payload.
-     * rem->size = spare - sizeof(header_t). Test 6 needs the 0; test 5.3's
-     * remainder of 24 is (1040 - 1000 - 16) under 8-byte alignment.
+     * SPLIT ARITHMETIC (sizes are payload-only; both records are 16 bytes):
+     *   spare     = block->size - request
+     *   split iff spare >= sizeof(node_t)       (>=, so a 0-byte node is legal)
+     *   rem       = (char *)hdr + sizeof(header_t) + request
+     *   rem->size = spare - sizeof(header_t)    (the new node's own record
+     *                                            comes out of the spare)
+     * Test 6: 1040 - 1024 = 16 -> rem->size 0. Test 5.3: 1040 - 1000 = 40
+     * -> rem->size 24. Otherwise no split: the caller keeps the whole block.
      */
     if (spare >= sizeof(node_t)) {
         node_t *rem = (node_t *)((char *)hdr + sizeof(header_t) + request);
@@ -756,7 +767,9 @@ void *myrealloc(void *ptr, size_t size)
         /*
          * Shrink in place when the tail can hold its own free node.
          * A smaller tail stays with the caller, same rule as allocation.
-         * rem->size = spare - sizeof(header_t), same formula as take_block.
+         * spare = hdr->size - request; split iff spare >= sizeof(node_t);
+         * rem = ptr + request; rem->size = spare - sizeof(header_t).
+         * Same formulas as take_block.
          */
         spare = (size_t)hdr->size - request;
         if (spare >= sizeof(node_t)) {
@@ -821,6 +834,7 @@ static void coalesce_linear(void)
     reset_next_fit_cursor();
     cur = __head;
     while (cur != NULL && cur->next != NULL) {
+        /* Adjacent: end of cur == start of next. Merge, unlink next. */
         if (free_block_end(cur) == (char *)cur->next) {
             absorb_neighbor(cur, cur->next);
             cur->next = cur->next->next;
@@ -892,6 +906,8 @@ void coalesce_freelist(void)
     for (i = 1; i < n; i++) {
         node_t *rhs = ordered[i];
 
+        /* Adjacent: end of tail == start of rhs. tail->size grows by
+         * sizeof(node_t) + rhs->size and rhs drops out of the chain. */
         if (free_block_end(tail) == (char *)rhs)
             absorb_neighbor(tail, rhs);
         else {
