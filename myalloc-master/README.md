@@ -93,50 +93,57 @@ The allocator is validated using an extensive test suite (`alligator.c`):
 
 ## 🛠️ Build & Run
 
-Compile:
+```bash
+make run     # alligator.c, tests 0–7. Does not build stress.c
+make san     # the same suite under address and undefined-behavior sanitizers
+make stress  # separate init/destroy, >100-node coalesce, and a small benchmark
+make clean
+```
+
+Experimental switches are in `myalloc_config.h`. A `-D` on the command line overrides a default there. `make run` after a flag change should start from `make clean`, because Make will not rebuild just because `CFLAGS` changed if the binary is already newer than the sources.
 
 ```bash
-make
+make clean
+make run CFLAGS="-Wall -Wextra -std=c11 -g -DMYALLOC_FIT=1"
+```
 
-Run tests:
-Shellmake runShow more lines
-Clean build:
-Shellmake cleanShow more lines
+## Project structure
 
-📁 Project Structure
+```text
 myalloc/
-├── myalloc.c       # allocator implementation
-├── myalloc.h       # data structures + prototypes
-├── alligator.c     # test suite
-├── Makefile        # build system
+├── myalloc.c          # allocator
+├── myalloc.h          # records and prototypes
+├── myalloc_config.h   # compile-time experiments and the pass/fail matrix
+├── alligator.c        # test suite
+├── stress.c           # not part of make run
+├── DESIGN.md          # invariants the suite depends on
+├── Makefile
 └── README.md
+```
 
 
-🔍 Design Notes
+## Design notes
 
-Uses a first-fit allocation strategy
-Free blocks are stored in a linked list
-Coalescing is implemented by sorting the free list and merging adjacent regions
-Heap integrity is verified using a magic number
+- First-fit allocation
+- Free blocks stored in a linked list
+- Coalescing sorts the free list and merges adjacent regions
+- Heap integrity is checked with a magic number
+
+## What I learned
+
+- How real-world memory allocators manage heap memory
+- The importance of maintaining consistent data structures
+- How small pointer arithmetic mistakes can cause major bugs
+- Techniques for debugging segmentation faults and memory corruption
 
 
-🚀 What I Learned
+The size rules, freelist order, alignment trade-off, and which experiments pass are written up in `DESIGN.md`.
 
-How real-world memory allocators manage heap memory
-The importance of maintaining consistent data structures
-How small pointer arithmetic mistakes can cause major bugs
-Techniques for debugging segmentation faults and memory corruption
+## Experiments
 
+The default path is first-fit, insert-at-head, and an explicit `coalesce_freelist()`. That is what `make run` checks.
 
-The size rules, freelist order, and why coalescing stays explicit are written up in `DESIGN.md`.
-
-✅ Future Improvements
-
-Best-fit is available with `-DMYALLOC_FIT=1` and passes the suite. Classic next-fit (`-DMYALLOC_FIT=2`) does not: test 7 requires the 16-byte block.
-Requests are rounded to 8 bytes. Rounding to 16 fails test 5.3.
-Coalesce still sorts, because the freelist is LIFO. The scratch array is bounded by the heap instead of a hard-coded 100.
-`print_heap()` walks the heap in address order. A real picture of fragmentation would be a separate tool.
-The heap is one global list with no lock. Concurrent `myalloc` / `myfree` is not safe.
+Best-fit (`-DMYALLOC_FIT=1`) passes. Next-fit (`-DMYALLOC_FIT=2`) fails test 7.3. Rounding to 16 bytes fails test 5.3. Coalescing inside `myfree` fails test 5.1. An address-ordered free list is available and passes the current size checks; it is not the default, because it changes which block first-fit sees first. A spinlock can be compiled in with `-DMYALLOC_LOCK=1` and is off by default. `init_heap` registers `destroy_heap` with `atexit` unless `-DMYALLOC_ATEXIT=0`.
 
 
 📚 Reference
