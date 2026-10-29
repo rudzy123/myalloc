@@ -128,12 +128,15 @@ How small pointer arithmetic mistakes can cause major bugs
 Techniques for debugging segmentation faults and memory corruption
 
 
+The size rules, freelist order, and why coalescing stays explicit are written up in `DESIGN.md`.
+
 ✅ Future Improvements
 
-Implement best-fit allocation strategy
-Add alignment (8/16-byte boundaries like real malloc)
-Improve performance by avoiding sorting during coalescing
-Add visualization of heap state
+Best-fit is available with `-DMYALLOC_FIT=1` and passes the suite. Classic next-fit (`-DMYALLOC_FIT=2`) does not: test 7 requires the 16-byte block.
+Requests are rounded to 8 bytes. Rounding to 16 fails test 5.3.
+Coalesce still sorts, because the freelist is LIFO. The scratch array is bounded by the heap instead of a hard-coded 100.
+`print_heap()` walks the heap in address order. A real picture of fragmentation would be a separate tool.
+The heap is one global list with no lock. Concurrent `myalloc` / `myfree` is not safe.
 
 
 📚 Reference

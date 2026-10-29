@@ -1,36 +1,64 @@
-#ifndef __MYALLOC_H
-#define __MYALLOC_H
+#ifndef MYALLOC_H
+#define MYALLOC_H
 
+/*
+ * Educational malloc/free over one fixed heap.
+ *
+ * Two metadata records occupy the same bytes at different times. They are
+ * the same width, and the second field sits at the same offset:
+ *
+ *   allocated: [ header_t | size | magic | user bytes .............. ]
+ *   free:      [ node_t   | size | next  | unused payload ........... ]
+ *
+ * `size` is always the byte count AFTER the metadata, never the whole block.
+ * Requests are rounded up to 8 bytes so the next header stays aligned.
+ * Every size alligator.c checks is already a multiple of 8, except the
+ * 14-byte allocation in test 7, which reuses a whole 16-byte free node.
+ * myfree() turns a header into a node by writing the freelist link over
+ * `magic`. A second free of the same pointer fails that magic check.
+ *
+ * The free list is unsorted. myfree() and block splits insert at the head.
+ * Neighboring free blocks merge only when coalesce_freelist() is called.
+ * Those choices are part of the contract alligator.c checks; see DESIGN.md.
+ */
+
+#include <stddef.h>
 
 #define HEAPSIZE 4096
-#define HEAPMAGIC 0x10c0beefbad1dea5
+#define HEAPMAGIC 0x10c0beefbad1dea5UL
 
-/* linked list element */
+/* Free-list node. `size` is the payload after this struct. */
 typedef struct __node_t {
-    long unsigned size;
+    unsigned long size;
     struct __node_t *next;
 } node_t;
 
-/* buffer metadata structure */
+/* Header of a live allocation. Same width and field offsets as node_t. */
 typedef struct __header_t {
-    long unsigned size;
-    long unsigned magic;
+    unsigned long size;
+    unsigned long magic;
 } header_t;
 
-extern void *__heap; /* pointer to the start of our "heap" */
-extern node_t *__head; /* the 'head' pointer for our freelist */
+extern void *__heap;   /* HEAPSIZE bytes from system malloc, or NULL */
+extern node_t *__head; /* freelist head; NULL when nothing is free */
 
-void print_header(header_t *header); /* print out header */
-void print_node(node_t *node);  /* print out node */
-void print_freelist_from(node_t *node); /* print freelist from node to NULL */
-void destroy_heap(); /* destroy current heap (reset function) */
-void *myalloc(size_t size); /* our new malloc-alike function */
-void myfree(void *ptr);  /* our new free-alike function */
-void coalesce_freelist(); /* coalesce all neighboring free regions */
+void print_header(const header_t *header);
+void print_node(const node_t *node);
+void print_freelist_from(const node_t *node);
+void print_heap(void);          /* address-ordered map of the whole heap */
+void myalloc_dump_stats(void);  /* counters for the current process */
 
-/* FOR OFFICE USE ONLY */
+void init_heap(void);
+void destroy_heap(void);
+
+void *myalloc(size_t size);
+void myfree(void *ptr);
+void *mycalloc(size_t nmemb, size_t size);
+void *myrealloc(void *ptr, size_t size);
+
+void coalesce_freelist(void);
+
+/* Unchecked: ptr must be a live user pointer. myfree() validates first. */
 header_t *get_header(void *ptr);
-
-void init_heap();
 
 #endif
