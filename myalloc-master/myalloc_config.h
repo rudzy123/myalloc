@@ -48,6 +48,8 @@
  * coalesce of 0 or 1 free nodes does not move the cursor.
  */
 
+/* 1: trace init/alloc/free/coalesce on stderr. Suite: passes (stdout is
+ * unchanged). Default 0. */
 #ifndef MYALLOC_DEBUG
 #define MYALLOC_DEBUG 0
 #endif
@@ -56,30 +58,44 @@
 #define MYALLOC_FIT_BEST  1
 #define MYALLOC_FIT_NEXT  2
 
+/* Free-list search policy.
+ * 0 first-fit: required default, passes.
+ * 1 best-fit:  smallest block that fits; passes.
+ * 2 next-fit:  resumes from a cursor; FAILS test 7.3. */
 #ifndef MYALLOC_FIT
 #define MYALLOC_FIT MYALLOC_FIT_FIRST
 #endif
 
+/* Request rounding, a power of two. 8 is required. 16 FAILS test 5.3
+ * (split remainder 16 instead of 24). */
 #ifndef MYALLOC_ALIGN
 #define MYALLOC_ALIGN 8
 #endif
 
+/* 0: coalesce only when coalesce_freelist() is called (required).
+ * 1: myfree() coalesces; FAILS test 5.1 (neighbors merge too early). */
 #ifndef MYALLOC_AUTO_COALESCE
 #define MYALLOC_AUTO_COALESCE 0
 #endif
 
-/* 0: insert at head (LIFO). 1: keep the free list in address order. */
+/* 0: insert at head (LIFO), required default.
+ * 1: keep the free list in address order; passes the current suite only
+ *    because test 7's freed node sits below the tail (see DESIGN.md). */
 #ifndef MYALLOC_ADDR_ORDER
 #define MYALLOC_ADDR_ORDER 0
 #endif
 
-/* 0: no synchronization. 1: recursive C11 spinlock around entry points. */
+/* 0: no synchronization; lock calls compile to nothing, no <stdatomic.h>
+ *    (required default).
+ * 1: recursive C11 spinlock around entry points; passes the suite on one
+ *    thread. Not a thread-safety claim: direct __head reads are unguarded. */
 #ifndef MYALLOC_LOCK
 #define MYALLOC_LOCK 0
 #endif
 
 /*
- * 1: init_heap registers destroy_heap with atexit.
+ * 1: init_heap registers destroy_heap with atexit (default; passes).
+ * 0: no handler; the last region stays reachable until exit (passes).
  * The handler is idempotent, so an explicit destroy_heap still works.
  */
 #ifndef MYALLOC_ATEXIT

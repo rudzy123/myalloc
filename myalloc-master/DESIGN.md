@@ -1,5 +1,13 @@
 # Allocator design
 
+## Current status
+
+- **The default path is green.** First-fit, insert-at-head, 8-byte alignment, explicit `coalesce_freelist()`, no lock, `atexit` cleanup on. `make clean && make && make run` passes `alligator.c` tests 0-7, `make san` (address + undefined-behavior sanitizers) is clean, and `make stress` ends with `stress: ok`.
+- **Experimental modes that pass the suite:** `MYALLOC_FIT=1` (best-fit), `MYALLOC_ADDR_ORDER=1`, `MYALLOC_LOCK=1` (single thread), `MYALLOC_ATEXIT=0`, `MYALLOC_DEBUG=1`.
+- **Experimental modes that fail:** `MYALLOC_FIT=2` (test 7.3), `MYALLOC_ALIGN=16` (test 5.3), `MYALLOC_AUTO_COALESCE=1` (test 5.1). `MYALLOC_FIT=2` with `MYALLOC_ADDR_ORDER=1` still fails 7.3.
+- **Known coincidence:** `MYALLOC_ADDR_ORDER=1` passes only because test 7's freed 16-byte block lies at a lower address than the large tail, so address order and insert-at-head show the same block to first-fit first. It is not equivalent to insert-at-head and is not the default. See "Address-ordered free list".
+- **Not done on purpose:** address-ordered coalescing without changing first-fit order, 16-byte alignment, thread safety. See `STATUS.md`.
+
 `alligator.c` checks one memory model, not a general-purpose malloc. This file is that contract. The defaults in `myalloc_config.h` are the configuration the suite requires. Everything else is an experiment.
 
 On this ABI both metadata records are 16 bytes. `size` is an `unsigned long` and the second field is a pointer or an `unsigned long`, so the records match. The code does not hard-code 16; it uses `sizeof` and checks the match with `_Static_assert`.
@@ -151,4 +159,4 @@ The reason is a second line on stderr, for example `myalloc: double free or inva
 
 ## What is still out of scope
 
-There is no per-thread heap. The default coalesce still sorts. `print_heap` prints an address-ordered text map; it does not draw a picture. `make stress` is the separate harness (151 free nodes, a gapped coalesce, calloc/realloc, and a short timed loop). It is not part of `make run`.
+The heap is one process-global 4096-byte region; it does not grow. There is no per-thread heap. Alignment is 8 bytes, not 16. The free list is unsorted by default. The default coalesce still sorts. `print_heap` prints an address-ordered text map; it does not draw a picture. `make stress` is the separate harness (151 free nodes, a gapped coalesce, calloc/realloc, and a short timed loop). It is not part of `make run`.
