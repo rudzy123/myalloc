@@ -11,7 +11,8 @@
  *   free:      [ node_t   | size | next  | unused payload ........... ]
  *
  * `size` is always the byte count AFTER the metadata, never the whole block.
- * Requests are rounded up to 8 bytes so the next header stays aligned.
+ * Requests are rounded up to 8 bytes by default (`MYALLOC_ALIGN` in
+ * myalloc_config.h) so the next header stays aligned.
  * Every size alligator.c checks is already a multiple of 8, except the
  * 14-byte allocation in test 7, which reuses a whole 16-byte free node.
  * myfree() turns a header into a node by writing the freelist link over
@@ -20,6 +21,11 @@
  * The free list is unsorted. myfree() and block splits insert at the head.
  * Neighboring free blocks merge only when coalesce_freelist() is called.
  * Those choices are part of the contract alligator.c checks; see DESIGN.md.
+ * Compile-time experiments (fit, alignment, address order, locking) live
+ * in myalloc_config.h. The defaults are the ones the suite requires.
+ *
+ * destroy_heap() is safe to call more than once, including before init.
+ * init_heap() registers it with atexit unless MYALLOC_ATEXIT is 0.
  */
 
 #include <stddef.h>
@@ -50,6 +56,11 @@ void myalloc_dump_stats(void);  /* counters for the current process */
 
 void init_heap(void);
 void destroy_heap(void);
+
+/* Register destroy_heap with atexit. Returns 0 on success.
+ * init_heap() does this when MYALLOC_ATEXIT is 1. Safe to call again. */
+int myalloc_atexit_install(void);
+#define MYALLOC_INSTALL_ATEXIT() myalloc_atexit_install()
 
 void *myalloc(size_t size);
 void myfree(void *ptr);

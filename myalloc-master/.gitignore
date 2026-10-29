@@ -1,4 +1,6 @@
 allocator
+allocator-san
+stress
 *.o
 CMakeFiles/
 CMakeCache.txt

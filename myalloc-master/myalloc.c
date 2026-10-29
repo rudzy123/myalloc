@@ -1,4 +1,5 @@
 #include "myalloc.h"
+#include "myalloc_config.h"
 
 #include <assert.h>
 #include <stdint.h>
@@ -6,51 +7,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if MYALLOC_LOCK
+#include <stdatomic.h>
+#endif
+
 /*
- * Compile-time knobs (defaults are what alligator.c requires):
- *
- *   -DMYALLOC_DEBUG=1
- *       Trace alloc, free, and coalesce on stderr.
- *
- *   -DMYALLOC_FIT=0|1|2
- *       0 first-fit (default), 1 best-fit, 2 next-fit.
- *       Best-fit passes the suite. Classic next-fit does not: test 7
- *       allocates 14 bytes while both a 16-byte block and a large tail
- *       fit, and the 16-byte block must be the one consumed.
- *
- *   -DMYALLOC_ALIGN=N
- *       Round requests up to a multiple of N. N is a power of two and a
- *       multiple of node_t's alignment (8). The default is 8: every size
- *       alligator.c actually checks is already a multiple of 8, except
- *       the 14-byte reuse in test 7, which consumes a 16-byte node whole
- *       either way. N=16 fails test 5.3, because a 1000-byte request into
- *       a 1040-byte free block must leave a 24-byte free node.
- *
- *   -DMYALLOC_AUTO_COALESCE=1
- *       Merge neighbors inside myfree(). Default off. Tests 5.1 and 6.1
- *       free two adjacent blocks and inspect the list before
- *       coalesce_freelist() runs.
+ * Knobs and the pass/fail matrix live in myalloc_config.h.
+ * Defaults: first-fit, insert-at-head, explicit coalesce, 8-byte align.
  */
-
-#ifndef MYALLOC_DEBUG
-#define MYALLOC_DEBUG 0
-#endif
-
-#define MYALLOC_FIT_FIRST 0
-#define MYALLOC_FIT_BEST  1
-#define MYALLOC_FIT_NEXT  2
-
-#ifndef MYALLOC_FIT
-#define MYALLOC_FIT MYALLOC_FIT_FIRST
-#endif
-
-#ifndef MYALLOC_ALIGN
-#define MYALLOC_ALIGN 8
-#endif
-
-#ifndef MYALLOC_AUTO_COALESCE
-#define MYALLOC_AUTO_COALESCE 0
-#endif
 
 #if MYALLOC_DEBUG
 #define DBG(...) fprintf(stderr, __VA_ARGS__)
@@ -59,9 +23,14 @@
 #endif
 
 /*
- * A free node occupies at least sizeof(node_t) bytes (payload may be 0).
- * That is the maximum number of free nodes a healthy heap can hold, so the
- * coalesce scratch array is bounded instead of the old list[100].
+ * A free node occupies at least sizeof(node_t) bytes, even when its
+ * payload size is 0. A HEAPSIZE-byte heap therefore holds at most
+ * HEAPSIZE / sizeof(node_t) free nodes (256 when the record is 16 bytes
+ * and the heap is 4096). The coalesce scratch array is exactly that long,
+ * so a healthy list cannot write past it. A longer walk is a cycle or a
+ * corrupt length and is reported instead of overflowing. This replaces
+ * the old node_t *list[100], which overflowed once more than 100 free
+ * nodes existed before coalescing.
  */
 enum { MYALLOC_MAX_FREE_NODES = HEAPSIZE / (int)sizeof(node_t) };
 
@@ -71,13 +40,40 @@ _Static_assert(offsetof(header_t, size) == 0 && offsetof(node_t, size) == 0,
                "size must be the first field of both metadata records");
 _Static_assert(offsetof(header_t, magic) == offsetof(node_t, next),
                "myfree overwrites magic with the freelist link");
-_Static_assert((MYALLOC_ALIGN & (MYALLOC_ALIGN - 1)) == 0,
+_Static_assert(sizeof(((header_t){0}).magic) == sizeof(((node_t){0}).next),
+               "magic and the freelist link must be the same width");
+_Static_assert((MYALLOC_ALIGN & (MYALLOC_ALIGN - 1)) == 0 && MYALLOC_ALIGN != 0,
                "MYALLOC_ALIGN must be a power of two");
 _Static_assert(MYALLOC_ALIGN % _Alignof(node_t) == 0,
                "MYALLOC_ALIGN must keep free-node headers aligned");
+_Static_assert(MYALLOC_ALIGN >= _Alignof(node_t),
+               "MYALLOC_ALIGN must be at least the alignment of node_t");
+_Static_assert(MYALLOC_MAX_FREE_NODES >= 1,
+               "heap cannot hold a free node");
+_Static_assert((size_t)MYALLOC_MAX_FREE_NODES * sizeof(node_t) <= (size_t)HEAPSIZE,
+               "free-node scratch bound does not fit in the heap");
+_Static_assert((size_t)(MYALLOC_MAX_FREE_NODES + 1) * sizeof(node_t) > (size_t)HEAPSIZE,
+               "free-node scratch bound is not tight");
+_Static_assert(MYALLOC_MAX_FREE_NODES > 100,
+               "scratch list must hold the >100 free-node stress case");
 #if MYALLOC_FIT != MYALLOC_FIT_FIRST && MYALLOC_FIT != MYALLOC_FIT_BEST && \
     MYALLOC_FIT != MYALLOC_FIT_NEXT
 #error "MYALLOC_FIT must be 0 (first), 1 (best), or 2 (next)"
+#endif
+#if MYALLOC_ADDR_ORDER != 0 && MYALLOC_ADDR_ORDER != 1
+#error "MYALLOC_ADDR_ORDER must be 0 (LIFO) or 1 (address order)"
+#endif
+#if MYALLOC_AUTO_COALESCE != 0 && MYALLOC_AUTO_COALESCE != 1
+#error "MYALLOC_AUTO_COALESCE must be 0 or 1"
+#endif
+#if MYALLOC_LOCK != 0 && MYALLOC_LOCK != 1
+#error "MYALLOC_LOCK must be 0 or 1"
+#endif
+#if MYALLOC_ATEXIT != 0 && MYALLOC_ATEXIT != 1
+#error "MYALLOC_ATEXIT must be 0 or 1"
+#endif
+#if MYALLOC_DEBUG != 0 && MYALLOC_DEBUG != 1
+#error "MYALLOC_DEBUG must be 0 or 1"
 #endif
 
 void *__heap = NULL;
@@ -86,7 +82,65 @@ node_t *__head = NULL;
 #if MYALLOC_FIT == MYALLOC_FIT_NEXT
 /* Block where the next next-fit search starts. Not used by the default. */
 static node_t *rover = NULL;
+/* Remainder created by the take_block call in progress, or NULL. */
+static node_t *split_remainder = NULL;
 #endif
+
+#if MYALLOC_LOCK
+/*
+ * Recursive so mycalloc/myrealloc can call myalloc/myfree while holding
+ * the lock. Off unless MYALLOC_LOCK=1; the default build does not take it
+ * and does not link pthread. Not signal-safe. Direct reads of __head from
+ * outside the allocator (alligator.c does this) are not covered.
+ */
+static atomic_flag heap_lock_flag = ATOMIC_FLAG_INIT;
+static _Thread_local int heap_lock_depth;
+
+static void heap_lock(void)
+{
+    if (heap_lock_depth > 0) {
+        heap_lock_depth++;
+        return;
+    }
+    while (atomic_flag_test_and_set_explicit(&heap_lock_flag,
+                                             memory_order_acquire)) {
+#if defined(__i386__) || defined(__x86_64__)
+        __asm__ __volatile__("pause");
+#endif
+    }
+    heap_lock_depth = 1;
+}
+
+static void heap_unlock(void)
+{
+    if (heap_lock_depth > 1) {
+        heap_lock_depth--;
+        return;
+    }
+    if (heap_lock_depth == 1) {
+        heap_lock_depth = 0;
+        atomic_flag_clear_explicit(&heap_lock_flag, memory_order_release);
+    }
+}
+#else
+#define heap_lock() ((void)0)
+#define heap_unlock() ((void)0)
+#endif
+
+#if MYALLOC_FIT == MYALLOC_FIT_NEXT
+/* A merge can absorb the node rover points at. Drop it before rewriting. */
+#define reset_next_fit_cursor() do { rover = NULL; } while (0)
+#else
+#define reset_next_fit_cursor() ((void)0)
+#endif
+
+static int exit_handler_installed;
+
+#define CORRUPT_BAD_NODE "free-list node is outside the heap, misaligned, or mis-sized"
+#define CORRUPT_TOO_LONG "free list is longer than the heap can hold"
+#define CORRUPT_OVERLAP  "free-list nodes overlap"
+#define CORRUPT_NOT_LIVE "double free or invalid pointer"
+#define CORRUPT_UNORDERED "free list is not in address order"
 
 typedef struct myalloc_stats {
     unsigned long heap_inits;
@@ -101,10 +155,16 @@ typedef struct myalloc_stats {
 
 static myalloc_stats stats;
 
-static void report_corrupt(void)
+static void report_corrupt(const char *detail)
 {
-    /* Test 4 looks for this sentence on a double free. */
+    /*
+     * Test 4 looks for this sentence on stdout. The detail goes to stderr
+     * so the checked line stays exactly "The heap is corrupt!".
+     */
     printf("The heap is corrupt!\n");
+    fflush(stdout);
+    if (detail != NULL && detail[0] != '\0')
+        fprintf(stderr, "myalloc: %s\n", detail);
 }
 
 static char *heap_lo(void)
@@ -150,10 +210,63 @@ static int free_node_ok(const node_t *node)
 static int too_many_nodes(size_t seen)
 {
     if (seen > MYALLOC_MAX_FREE_NODES) {
-        report_corrupt();
+        report_corrupt(CORRUPT_TOO_LONG);
         return 1;
     }
     return 0;
+}
+
+/*
+ * Default (MYALLOC_ADDR_ORDER=0): push at the head. O(1), LIFO.
+ * Test 7's 14-byte request must see the just-freed 16-byte node before
+ * the large tail. Do not reorder this branch.
+ *
+ * Address-order mode splices by address so coalesce can merge in one
+ * forward scan. First-fit then prefers the lowest address.
+ */
+static void insert_freenode(node_t *node)
+{
+#if MYALLOC_ADDR_ORDER
+    node_t *prev = NULL;
+    node_t *cur = __head;
+    size_t seen = 0;
+
+    while (cur != NULL && (uintptr_t)cur < (uintptr_t)node) {
+        int bad = !free_node_ok(cur);
+
+        if (!bad)
+            seen++;
+        if (bad || seen > MYALLOC_MAX_FREE_NODES) {
+            report_corrupt(bad ? CORRUPT_BAD_NODE : CORRUPT_TOO_LONG);
+            node->next = __head;
+            __head = node;
+            return;
+        }
+        prev = cur;
+        cur = cur->next;
+    }
+    if (cur != NULL && !free_node_ok(cur)) {
+        report_corrupt(CORRUPT_BAD_NODE);
+        node->next = __head;
+        __head = node;
+        return;
+    }
+    node->next = cur;
+    if (prev == NULL)
+        __head = node;
+    else
+        prev->next = node;
+#else
+    node->next = __head;
+    __head = node;
+#endif
+}
+
+/* rhs's header becomes payload: size += sizeof(node_t) + rhs->size.
+ * Two 512-byte neighbors become 1024 + sizeof(header_t) (tests 5.2, 6.2). */
+static void absorb_neighbor(node_t *lhs, const node_t *rhs)
+{
+    lhs->size += (unsigned long)sizeof(node_t) + rhs->size;
 }
 
 header_t *get_header(void *ptr)
@@ -231,6 +344,9 @@ static void *take_block(node_t *prev, node_t *block, size_t request)
     size_t spare;
 
     assert((size_t)free_size >= request);
+#if MYALLOC_FIT == MYALLOC_FIT_NEXT
+    split_remainder = NULL;
+#endif
 
     if (prev != NULL)
         prev->next = next;
@@ -238,9 +354,15 @@ static void *take_block(node_t *prev, node_t *block, size_t request)
         __head = next;
 
     hdr = (header_t *)block;
+    /* Same bytes myfree will overwrite with the freelist link. */
     hdr->magic = HEAPMAGIC;
 
     spare = (size_t)free_size - request;
+    /*
+     * Split iff the leftover can hold a node_t, including a 0-byte payload.
+     * rem->size = spare - sizeof(header_t). Test 6 needs the 0; test 5.3's
+     * remainder of 24 is (1040 - 1000 - 16) under 8-byte alignment.
+     */
     if (spare >= sizeof(node_t)) {
         node_t *rem = (node_t *)((char *)hdr + sizeof(header_t) + request);
 
@@ -249,8 +371,10 @@ static void *take_block(node_t *prev, node_t *block, size_t request)
         assert(((uintptr_t)rem % _Alignof(node_t)) == 0);
 
         rem->size = (unsigned long)(spare - sizeof(header_t));
-        rem->next = __head;
-        __head = rem;
+        insert_freenode(rem);
+#if MYALLOC_FIT == MYALLOC_FIT_NEXT
+        split_remainder = rem;
+#endif
         hdr->size = (unsigned long)request;
     } else {
         hdr->size = free_size;
@@ -268,7 +392,7 @@ static void *first_fit(size_t request)
 
     for (cur = __head; cur != NULL; prev = cur, cur = cur->next) {
         if (!free_node_ok(cur)) {
-            report_corrupt();
+            report_corrupt(CORRUPT_BAD_NODE);
             return NULL;
         }
         if (too_many_nodes(++seen))
@@ -291,7 +415,7 @@ static void *best_fit(size_t request)
 
     for (cur = __head; cur != NULL; prev = cur, cur = cur->next) {
         if (!free_node_ok(cur)) {
-            report_corrupt();
+            report_corrupt(CORRUPT_BAD_NODE);
             return NULL;
         }
         if (too_many_nodes(++seen))
@@ -328,7 +452,7 @@ static void *next_fit(size_t request)
 
         while (walk != NULL && walk != rover) {
             if (!free_node_ok(walk)) {
-                report_corrupt();
+                report_corrupt(CORRUPT_BAD_NODE);
                 return NULL;
             }
             if (too_many_nodes(++seen))
@@ -338,7 +462,7 @@ static void *next_fit(size_t request)
         }
         if (walk == rover) {
             if (!free_node_ok(walk)) {
-                report_corrupt();
+                report_corrupt(CORRUPT_BAD_NODE);
                 return NULL;
             }
             prev = walk_prev;
@@ -347,7 +471,7 @@ static void *next_fit(size_t request)
     }
 
     if (!free_node_ok(cur)) {
-        report_corrupt();
+        report_corrupt(CORRUPT_BAD_NODE);
         return NULL;
     }
 
@@ -355,23 +479,25 @@ static void *next_fit(size_t request)
     seen = 0;
     for (;;) {
         node_t *after;
-        size_t spare;
         void *mem;
 
         if (!free_node_ok(cur)) {
-            report_corrupt();
+            report_corrupt(CORRUPT_BAD_NODE);
             return NULL;
         }
         if (too_many_nodes(++seen))
             return NULL;
         if ((size_t)cur->size >= request) {
-            /* Update the rover after the split, so it never keeps a
-             * pointer to the block we just turned into a header. */
+            /*
+             * Do not leave rover on the block that is about to become a
+             * header. A split resumes at the remainder. Insert-at-head
+             * pushes that remainder to __head, so this is the old
+             * `rover = __head` assignment when MYALLOC_ADDR_ORDER is off.
+             */
             after = cur->next;
-            spare = (size_t)cur->size - request;
             mem = take_block(prev, cur, request);
-            if (spare >= sizeof(node_t))
-                rover = __head;
+            if (split_remainder != NULL)
+                rover = split_remainder;
             else
                 rover = (after != NULL) ? after : __head;
             return mem;
@@ -417,18 +543,35 @@ static char *free_block_end(const node_t *node)
     return (char *)node + sizeof(node_t) + node->size;
 }
 
+int myalloc_atexit_install(void)
+{
+    if (exit_handler_installed)
+        return 0;
+    if (atexit(destroy_heap) != 0)
+        return -1;
+    exit_handler_installed = 1;
+    return 0;
+}
+
 void init_heap(void)
 {
     node_t *head;
 
+    heap_lock();
     if (__heap != NULL)
-        return;
+        goto out;
+
+    __head = NULL;
+#if MYALLOC_FIT == MYALLOC_FIT_NEXT
+    rover = NULL;
+    split_remainder = NULL;
+#endif
 
     __heap = malloc(HEAPSIZE);
     if (__heap == NULL) {
         fprintf(stderr, "Couldn't initialize heap!\n");
         __head = NULL;
-        return;
+        goto out;
     }
 
     /*
@@ -446,28 +589,56 @@ void init_heap(void)
 #endif
     stats.heap_inits++;
     DBG("init_heap: heap %p payload %lu\n", __heap, head->size);
+
+#if MYALLOC_ATEXIT
+    /* Idempotent. A later destroy_heap, including this handler, is safe. */
+    (void)myalloc_atexit_install();
+#endif
+out:
+    heap_unlock();
 }
 
 void destroy_heap(void)
 {
-    free(__heap);
+    void *heap;
+
+    heap_lock();
+    /*
+     * Null the globals before free so a second call, including the atexit
+     * handler after an explicit destroy, does not free the region twice.
+     */
+    if (__heap == NULL) {
+        __head = NULL;
+#if MYALLOC_FIT == MYALLOC_FIT_NEXT
+        rover = NULL;
+        split_remainder = NULL;
+#endif
+        goto out;
+    }
+
+    heap = __heap;
     __heap = NULL;
     __head = NULL;
 #if MYALLOC_FIT == MYALLOC_FIT_NEXT
     rover = NULL;
+    split_remainder = NULL;
 #endif
+    free(heap);
+out:
+    heap_unlock();
 }
 
 void *myalloc(size_t size)
 {
     size_t request;
-    void *ptr;
+    void *ptr = NULL;
 
+    heap_lock();
     if (__heap == NULL)
         init_heap();
     if (__heap == NULL) {
         stats.alloc_fail++;
-        return NULL;
+        goto out;
     }
 
     request = adjust_request(size);
@@ -476,12 +647,14 @@ void *myalloc(size_t size)
     if (ptr == NULL) {
         stats.alloc_fail++;
         DBG("myalloc(%zu) failed\n", size);
-        return NULL;
+        goto out;
     }
 
     stats.alloc_ok++;
     stats.bytes_requested += size;
     stats.bytes_granted += get_header(ptr)->size;
+out:
+    heap_unlock();
     return ptr;
 }
 
@@ -491,52 +664,63 @@ void myfree(void *ptr)
     node_t *node;
     unsigned long bytes;
 
+    heap_lock();
     if (ptr == NULL)
-        return;
+        goto out;
+
+    if (__heap == NULL) {
+        stats.free_reject++;
+        report_corrupt("heap is not initialized");
+        goto out;
+    }
 
     hdr = live_header(ptr);
     if (hdr == NULL) {
         stats.free_reject++;
-        report_corrupt();
-        return;
+        report_corrupt(CORRUPT_NOT_LIVE);
+        goto out;
     }
 
     /*
-     * Keep the payload size, then overlay a node on the header. Assigning
+     * Keep the payload size, then overlay a node on the header. Writing
      * next replaces magic, which is what makes the next free fail.
-     * Insert at the head (O(1)). Test 7 depends on that order for first-fit:
-     * the 16-byte block just freed must be tried before the large tail.
-     * Coalescing here would merge blocks the suite still expects to see
-     * as separate nodes.
+     * Insert at the head (O(1)) unless address order is compiled in.
+     * Test 7 depends on that LIFO order for first-fit: the 16-byte block
+     * just freed must be tried before the large tail. Coalescing here
+     * would merge blocks the suite still expects to see as separate nodes.
      */
     bytes = hdr->size;
     node = (node_t *)hdr;
     node->size = bytes;
-    node->next = __head;
-    __head = node;
+    insert_freenode(node);
     stats.free_ok++;
     DBG("myfree(%p) size %lu\n", ptr, bytes);
 
 #if MYALLOC_AUTO_COALESCE
     coalesce_freelist();
 #endif
+out:
+    heap_unlock();
 }
 
 void *mycalloc(size_t nmemb, size_t size)
 {
-    void *ptr;
+    void *ptr = NULL;
     header_t *hdr;
 
+    heap_lock();
     if (size != 0 && nmemb > SIZE_MAX / size)
-        return NULL;
+        goto out;
 
     ptr = myalloc(nmemb * size);
     if (ptr == NULL)
-        return NULL;
+        goto out;
 
     /* Zero the whole granted block, which may be larger than nmemb * size. */
     hdr = get_header(ptr);
     memset(ptr, 0, hdr->size);
+out:
+    heap_unlock();
     return ptr;
 }
 
@@ -545,19 +729,26 @@ void *myrealloc(void *ptr, size_t size)
     header_t *hdr;
     size_t request;
     size_t spare;
-    void *fresh;
+    void *fresh = NULL;
 
-    if (ptr == NULL)
-        return myalloc(size);
+    heap_lock();
+    if (ptr == NULL) {
+        fresh = myalloc(size);
+        goto out;
+    }
     if (size == 0) {
         myfree(ptr);
-        return NULL;
+        goto out;
+    }
+    if (__heap == NULL) {
+        report_corrupt("heap is not initialized");
+        goto out;
     }
 
     hdr = live_header(ptr);
     if (hdr == NULL) {
-        report_corrupt();
-        return NULL;
+        report_corrupt(CORRUPT_NOT_LIVE);
+        goto out;
     }
 
     request = adjust_request(size);
@@ -565,6 +756,7 @@ void *myrealloc(void *ptr, size_t size)
         /*
          * Shrink in place when the tail can hold its own free node.
          * A smaller tail stays with the caller, same rule as allocation.
+         * rem->size = spare - sizeof(header_t), same formula as take_block.
          */
         spare = (size_t)hdr->size - request;
         if (spare >= sizeof(node_t)) {
@@ -572,42 +764,106 @@ void *myrealloc(void *ptr, size_t size)
 
             assert(((uintptr_t)rem % _Alignof(node_t)) == 0);
             rem->size = (unsigned long)(spare - sizeof(header_t));
-            rem->next = __head;
-            __head = rem;
+            insert_freenode(rem);
             hdr->size = (unsigned long)request;
         }
-        return ptr;
+        fresh = ptr;
+        goto out;
     }
 
     fresh = myalloc(size);
     if (fresh == NULL)
-        return NULL;
+        goto out;
     memcpy(fresh, ptr, hdr->size);
     myfree(ptr);
+out:
+    heap_unlock();
     return fresh;
 }
 
+#if MYALLOC_ADDR_ORDER
+/*
+ * The free list is already in address order, so merging is one forward
+ * scan. Same absorb rule as the sort path. Validate the whole list before
+ * rewriting any next pointer.
+ */
+static void coalesce_linear(void)
+{
+    node_t *prev = NULL;
+    node_t *cur;
+    size_t n = 0;
+
+    for (cur = __head; cur != NULL; prev = cur, cur = cur->next) {
+        if (!free_node_ok(cur)) {
+            report_corrupt(CORRUPT_BAD_NODE);
+            return;
+        }
+        if (n == MYALLOC_MAX_FREE_NODES) {
+            report_corrupt(CORRUPT_TOO_LONG);
+            return;
+        }
+        if (prev != NULL) {
+            if ((uintptr_t)cur <= (uintptr_t)prev) {
+                report_corrupt(CORRUPT_UNORDERED);
+                return;
+            }
+            if (free_block_end(prev) > (char *)cur) {
+                report_corrupt(CORRUPT_OVERLAP);
+                return;
+            }
+        }
+        n++;
+    }
+
+    if (n <= 1)
+        return;
+
+    reset_next_fit_cursor();
+    cur = __head;
+    while (cur != NULL && cur->next != NULL) {
+        if (free_block_end(cur) == (char *)cur->next) {
+            absorb_neighbor(cur, cur->next);
+            cur->next = cur->next->next;
+        } else {
+            cur = cur->next;
+        }
+    }
+}
+#endif
+
 void coalesce_freelist(void)
 {
+#if !MYALLOC_ADDR_ORDER
     node_t *ordered[MYALLOC_MAX_FREE_NODES];
     size_t n = 0;
     size_t i;
     node_t *cur;
     node_t *tail;
+#endif
 
+    heap_lock();
     stats.coalesces++;
     DBG("coalesce_freelist\n");
 
+#if MYALLOC_ADDR_ORDER
+    coalesce_linear();
+    goto out;
+#else
     for (cur = __head; cur != NULL; cur = cur->next) {
-        if (!free_node_ok(cur) || n == MYALLOC_MAX_FREE_NODES) {
-            report_corrupt();
-            return;
+        if (!free_node_ok(cur)) {
+            report_corrupt(CORRUPT_BAD_NODE);
+            goto out;
         }
+        if (n == MYALLOC_MAX_FREE_NODES) {
+            report_corrupt(CORRUPT_TOO_LONG);
+            goto out;
+        }
+        /* Bounded by MYALLOC_MAX_FREE_NODES; see the static asserts. */
         ordered[n++] = cur;
     }
 
     if (n <= 1)
-        return;
+        goto out;
 
     qsort(ordered, n, sizeof ordered[0], freelist_addr_cmp);
 
@@ -616,8 +872,8 @@ void coalesce_freelist(void)
         char *end = free_block_end(ordered[i]);
 
         if (end > (char *)ordered[i + 1]) {
-            report_corrupt();
-            return;
+            report_corrupt(CORRUPT_OVERLAP);
+            goto out;
         }
     }
 
@@ -630,20 +886,24 @@ void coalesce_freelist(void)
      * two 512-byte neighbors merge. One pass, and absorbed nodes are not
      * visited again (the old list[100] loop wrote through them).
      */
+    reset_next_fit_cursor();
     tail = ordered[0];
     tail->next = NULL;
     for (i = 1; i < n; i++) {
         node_t *rhs = ordered[i];
 
-        if (free_block_end(tail) == (char *)rhs) {
-            tail->size += (unsigned long)sizeof(node_t) + rhs->size;
-        } else {
+        if (free_block_end(tail) == (char *)rhs)
+            absorb_neighbor(tail, rhs);
+        else {
             tail->next = rhs;
             tail = rhs;
             tail->next = NULL;
         }
     }
     __head = ordered[0];
+#endif
+out:
+    heap_unlock();
 }
 
 void print_header(const header_t *header)
@@ -676,11 +936,13 @@ void print_freelist_from(const node_t *node)
 {
     size_t seen = 0;
 
+    heap_lock();
     printf("\nPrinting freelist from %p\n", (const void *)node);
     while (node != NULL && seen++ < MYALLOC_MAX_FREE_NODES) {
         print_node(node);
         node = node->next;
     }
+    heap_unlock();
 }
 
 void print_heap(void)
@@ -692,15 +954,20 @@ void print_heap(void)
     char *hi;
     node_t *cur;
 
+    heap_lock();
     if (__heap == NULL) {
         printf("heap is not initialized\n");
-        return;
+        goto out;
     }
 
     for (cur = __head; cur != NULL; cur = cur->next) {
-        if (!free_node_ok(cur) || nfree == MYALLOC_MAX_FREE_NODES) {
-            report_corrupt();
-            return;
+        if (!free_node_ok(cur)) {
+            report_corrupt(CORRUPT_BAD_NODE);
+            goto out;
+        }
+        if (nfree == MYALLOC_MAX_FREE_NODES) {
+            report_corrupt(CORRUPT_TOO_LONG);
+            goto out;
         }
         free_nodes[nfree++] = cur;
     }
@@ -733,14 +1000,18 @@ void print_heap(void)
                (void *)(p + sizeof(header_t)), hdr->size);
         p += sizeof(header_t) + hdr->size;
     }
+out:
+    heap_unlock();
 }
 
 void myalloc_dump_stats(void)
 {
+    heap_lock();
     printf("myalloc stats: inits %lu  alloc_ok %lu  alloc_fail %lu  "
            "free_ok %lu  free_reject %lu  coalesces %lu  "
            "requested %lu  granted %lu\n",
            stats.heap_inits, stats.alloc_ok, stats.alloc_fail,
            stats.free_ok, stats.free_reject, stats.coalesces,
            stats.bytes_requested, stats.bytes_granted);
+    heap_unlock();
 }
